@@ -36,6 +36,14 @@ spec:
         env:
         - name: GH_RA_IMAGE
           value: knative.dev/eventing-contrib/github/cmd/receive_adapter
+        - name: SYSTEM_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: METRICS_DOMAIN
+          value: knative.dev/sources
+        - name: CONFIG_OBSERVABILITY_NAME
+          value: config-observability
         resources:
           requests:
             cpu: 100m

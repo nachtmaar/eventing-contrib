@@ -871,7 +871,7 @@ func TestAllCases(t *testing.T) {
 			hookData = webhookCreatorData{}
 		}
 
-		r := &reconciler{
+		r := &Reconciler{
 			scheme:   tc.Scheme,
 			recorder: recorder,
 			webhookClient: &mockWebhookClient{
@@ -1170,7 +1170,7 @@ type webhookCreatorData struct {
 // Direct Unit tests.
 
 func TestObjectNotGitHubSource(t *testing.T) {
-	r := reconciler{}
+	r := Reconciler{}
 	obj := &corev1.ObjectReference{
 		Name:       unaddressableName,
 		Kind:       unaddressableKind,

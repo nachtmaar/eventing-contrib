@@ -19,38 +19,33 @@ package sinks
 import (
 	"context"
 	"fmt"
+	"k8s.io/client-go/dynamic"
+	eventingduck "knative.dev/eventing/pkg/duck"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"knative.dev/pkg/apis/duck"
 	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // GetSinkURI retrieves the sink URI from the object referenced by the given
 // ObjectReference.
-func GetSinkURI(ctx context.Context, c client.Client, sink *corev1.ObjectReference, namespace string) (string, error) {
+func GetSinkURI(ctx context.Context, dynamicClientSet dynamic.Interface, sink *corev1.ObjectReference, namespace string) (string, error) {
 	if sink == nil {
 		return "", fmt.Errorf("sink ref is nil")
 	}
 
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(sink.GroupVersionKind())
-	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: sink.Name}, u)
-	if err != nil {
-		return "", err
-	}
-
-	objIdentifier := fmt.Sprintf("\"%s/%s\" (%s)", u.GetNamespace(), u.GetName(), u.GroupVersionKind())
-	// Special case v1/Service to allow it be addressable
-	if u.GroupVersionKind().Kind == "Service" && u.GroupVersionKind().Version == "v1" {
-		return fmt.Sprintf("http://%s.%s.svc/", u.GetName(), u.GetNamespace()), nil
-	}
+	u, err := eventingduck.ObjectReference(ctx, dynamicClientSet, namespace, sink)
 
 	t := duckv1alpha1.AddressableType{}
+	t.SetGroupVersionKind(sink.GroupVersionKind())
 	err = duck.FromUnstructured(u, &t)
+	objIdentifier := fmt.Sprintf("\"%s/%s\" (%s)", t.GetNamespace(), t.GetName(), t.GroupVersionKind())
 	if err != nil {
 		return "", fmt.Errorf("failed to deserialize sink %s: %v", objIdentifier, err)
+	}
+	// Special case v1/Service to allow it be addressable
+	if t.GroupVersionKind().Kind == "Service" && t.GroupVersionKind().Version == "v1" {
+		return fmt.Sprintf("http://%s.%s.svc/", t.GetName(), t.GetNamespace()), nil
 	}
 
 	if t.Status.Address == nil {

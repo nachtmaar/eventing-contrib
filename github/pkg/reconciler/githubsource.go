@@ -19,8 +19,10 @@ package reconciler
 import (
 	"context"
 	"fmt"
-	"log"
-	"os"
+	"k8s.io/client-go/kubernetes"
+	v1 "k8s.io/client-go/listers/core/v1"
+	"knative.dev/eventing/pkg/reconciler"
+	"knative.dev/serving/pkg/client/listers/serving/v1alpha1"
 	"strings"
 
 	"go.uber.org/zap"
@@ -31,17 +33,13 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/tools/record"
 	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
 	"knative.dev/pkg/logging"
 	servingv1alpha1 "knative.dev/serving/pkg/apis/serving/v1alpha1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
+	versioned "knative.dev/serving/pkg/client/clientset/versioned"
 
 	sourcesv1alpha1 "knative.dev/eventing-contrib/github/pkg/apis/sources/v1alpha1"
 	"knative.dev/eventing-contrib/github/pkg/reconciler/resources"
-	"knative.dev/eventing-contrib/pkg/controller/sdk"
 	"knative.dev/eventing-contrib/pkg/controller/sinks"
 	"knative.dev/eventing-contrib/pkg/reconciler/eventtype"
 )
@@ -54,42 +52,17 @@ const (
 	finalizerName       = controllerAgentName
 )
 
-// Add creates a new GitHubSource Controller and adds it to the
-// Manager with default RBAC. The Manager will set fields on the
-// Controller and Start it when the Manager is Started.
-func Add(mgr manager.Manager, logger *zap.SugaredLogger) error {
-	receiveAdapterImage, defined := os.LookupEnv(raImageEnvVar)
-	if !defined {
-		return fmt.Errorf("required environment variable %q not defined", raImageEnvVar)
-	}
+// Reconciler reconciles a GitHubSource object
+type Reconciler struct {
+	*reconciler.Base
 
-	log.Println("Adding the GitHub Source controller.")
-	p := &sdk.Provider{
-		AgentName: controllerAgentName,
-		Parent:    &sourcesv1alpha1.GitHubSource{},
-		Owns:      []runtime.Object{&servingv1alpha1.Service{}, &eventingv1alpha1.EventType{}},
-		Reconciler: &reconciler{
-			recorder:            mgr.GetRecorder(controllerAgentName),
-			scheme:              mgr.GetScheme(),
-			receiveAdapterImage: receiveAdapterImage,
-			webhookClient:       gitHubWebhookClient{},
-			eventTypeReconciler: eventtype.Reconciler{
-				Scheme: mgr.GetScheme(),
-			},
-		},
-	}
-
-	return p.Add(mgr, logger)
-}
-
-// reconciler reconciles a GitHubSource object
-type reconciler struct {
-	client              client.Client
-	scheme              *runtime.Scheme
-	recorder            record.EventRecorder
+	kubeClientSet       kubernetes.Clientset
 	receiveAdapterImage string
 	webhookClient       webhookClient
 	eventTypeReconciler eventtype.Reconciler
+	secretLister        v1.SecretLister
+	ksvcLister          v1alpha1.ServiceLister
+	servingClient       versioned.Interface
 }
 
 type webhookArgs struct {
@@ -104,7 +77,7 @@ type webhookArgs struct {
 // Reconcile reads that state of the cluster for a GitHubSource
 // object and makes changes based on the state read and what is in the
 // GitHubSource.Spec
-func (r *reconciler) Reconcile(ctx context.Context, object runtime.Object) error {
+func (r *Reconciler) Reconcile(ctx context.Context, object runtime.Object) error {
 	logger := logging.FromContext(ctx)
 
 	source, ok := object.(*sourcesv1alpha1.GitHubSource)
@@ -130,7 +103,7 @@ func (r *reconciler) Reconcile(ctx context.Context, object runtime.Object) error
 	return reconcileErr
 }
 
-func (r *reconciler) reconcile(ctx context.Context, source *sourcesv1alpha1.GitHubSource) error {
+func (r *Reconciler) reconcile(ctx context.Context, source *sourcesv1alpha1.GitHubSource) error {
 	source.Status.ObservedGeneration = source.Generation
 	source.Status.InitializeConditions()
 
@@ -146,7 +119,7 @@ func (r *reconciler) reconcile(ctx context.Context, source *sourcesv1alpha1.GitH
 	}
 	source.Status.MarkSecrets()
 
-	uri, err := sinks.GetSinkURI(ctx, r.client, source.Spec.Sink, source.Namespace)
+	uri, err := sinks.GetSinkURI(ctx, r.DynamicClientSet, source.Spec.Sink, source.Namespace)
 	if err != nil {
 		source.Status.MarkNoSink("NotFound", "%s", err)
 		return err
@@ -157,13 +130,15 @@ func (r *reconciler) reconcile(ctx context.Context, source *sourcesv1alpha1.GitH
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			ksvc = resources.MakeService(source, r.receiveAdapterImage)
-			if err = controllerutil.SetControllerReference(source, ksvc, r.scheme); err != nil {
+			// TODO(nachtmaar) - is this still required ?
+			//if err = controllerutil.SetControllerReference(source, ksvc, r.scheme); err != nil {
+			//	return err
+			//}
+			// TODO(nachtmaar) is v1alpha1 correct ?
+			if _, err = r.servingClient.ServingV1alpha1().Services(ksvc.Namespace).Create(ksvc); err != nil {
 				return err
 			}
-			if err = r.client.Create(ctx, ksvc); err != nil {
-				return err
-			}
-			r.recorder.Eventf(source, corev1.EventTypeNormal, "ServiceCreated", "Created Service %q", ksvc.Name)
+			r.Recorder.Eventf(source, corev1.EventTypeNormal, "ServiceCreated", "Created Service %q", ksvc.Name)
 			// TODO: Mark Deploying for the ksvc
 			// Wait for the Service to get a status
 			return nil
@@ -206,7 +181,7 @@ func (r *reconciler) reconcile(ctx context.Context, source *sourcesv1alpha1.GitH
 	return nil
 }
 
-func (r *reconciler) finalize(ctx context.Context, source *sourcesv1alpha1.GitHubSource) error {
+func (r *Reconciler) finalize(ctx context.Context, source *sourcesv1alpha1.GitHubSource) error {
 	// Always remove the finalizer. If there's a failure cleaning up, an event
 	// will be recorded allowing the webhook to be removed manually by the
 	// operator.
@@ -218,7 +193,7 @@ func (r *reconciler) finalize(ctx context.Context, source *sourcesv1alpha1.GitHu
 		accessToken, err := r.secretFrom(ctx, source.Namespace, source.Spec.AccessToken.SecretKeyRef)
 		if err != nil {
 			source.Status.MarkNoSecrets("AccessTokenNotFound", "%s", err)
-			r.recorder.Eventf(source, corev1.EventTypeWarning, "FailedFinalize", "Could not delete webhook %q: %v", source.Status.WebhookIDKey, err)
+			r.Recorder.Eventf(source, corev1.EventTypeWarning, "FailedFinalize", "Could not delete webhook %q: %v", source.Status.WebhookIDKey, err)
 			return err
 		}
 
@@ -231,7 +206,7 @@ func (r *reconciler) finalize(ctx context.Context, source *sourcesv1alpha1.GitHu
 		// Delete the webhook using the access token and stored webhook ID
 		err = r.deleteWebhook(ctx, args)
 		if err != nil {
-			r.recorder.Eventf(source, corev1.EventTypeWarning, "FailedFinalize", "Could not delete webhook %q: %v", source.Status.WebhookIDKey, err)
+			r.Recorder.Eventf(source, corev1.EventTypeWarning, "FailedFinalize", "Could not delete webhook %q: %v", source.Status.WebhookIDKey, err)
 			return err
 		}
 		// Webhook deleted, clear ID
@@ -239,7 +214,7 @@ func (r *reconciler) finalize(ctx context.Context, source *sourcesv1alpha1.GitHu
 	}
 	return nil
 }
-func (r *reconciler) createWebhook(ctx context.Context, args *webhookArgs) (string, error) {
+func (r *Reconciler) createWebhook(ctx context.Context, args *webhookArgs) (string, error) {
 	logger := logging.FromContext(ctx)
 
 	logger.Info("creating GitHub webhook")
@@ -265,7 +240,7 @@ func (r *reconciler) createWebhook(ctx context.Context, args *webhookArgs) (stri
 	return hookID, nil
 }
 
-func (r *reconciler) deleteWebhook(ctx context.Context, args *webhookArgs) error {
+func (r *Reconciler) deleteWebhook(ctx context.Context, args *webhookArgs) error {
 	logger := logging.FromContext(ctx)
 
 	logger.Info("deleting GitHub webhook")
@@ -289,9 +264,9 @@ func (r *reconciler) deleteWebhook(ctx context.Context, args *webhookArgs) error
 	return nil
 }
 
-func (r *reconciler) secretFrom(ctx context.Context, namespace string, secretKeySelector *corev1.SecretKeySelector) (string, error) {
-	secret := &corev1.Secret{}
-	err := r.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretKeySelector.Name}, secret)
+func (r *Reconciler) secretFrom(ctx context.Context, namespace string, secretKeySelector *corev1.SecretKeySelector) (string, error) {
+
+	secret, err := r.secretLister.Secrets(namespace).Get(secretKeySelector.Name)
 	if err != nil {
 		return "", err
 	}
@@ -319,39 +294,28 @@ func parseOwnerRepoFrom(ownerAndRepository string) (string, string, error) {
 	return owner, repo, nil
 }
 
-func (r *reconciler) getOwnedService(ctx context.Context, source *sourcesv1alpha1.GitHubSource) (*servingv1alpha1.Service, error) {
-	list := &servingv1alpha1.ServiceList{}
-	err := r.client.List(ctx, &client.ListOptions{
-		Namespace:     source.Namespace,
-		LabelSelector: labels.Everything(),
-		// TODO this is here because the fake client needs it.
-		// Remove this when it's no longer needed.
-		Raw: &metav1.ListOptions{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: servingv1alpha1.SchemeGroupVersion.String(),
-				Kind:       "Service",
-			},
-		},
-	},
-		list)
+func (r *Reconciler) getOwnedService(ctx context.Context, source *sourcesv1alpha1.GitHubSource) (*servingv1alpha1.Service, error) {
+	ksvList, err := r.ksvcLister.Services(source.Namespace).List(labels.Everything())
+
 	if err != nil {
 		return nil, err
 	}
-	for _, ksvc := range list.Items {
-		if metav1.IsControlledBy(&ksvc, source) {
+	for _, ksvc := range ksvList {
+		if metav1.IsControlledBy(ksvc, source) {
 			//TODO if there are >1 controlled, delete all but first?
-			return &ksvc, nil
+			return ksvc, nil
 		}
 	}
+
 	return nil, apierrors.NewNotFound(servingv1alpha1.Resource("services"), "")
 }
 
-func (r *reconciler) reconcileEventTypes(ctx context.Context, source *sourcesv1alpha1.GitHubSource) error {
+func (r *Reconciler) reconcileEventTypes(ctx context.Context, source *sourcesv1alpha1.GitHubSource) error {
 	args := r.newEventTypeReconcilerArgs(source)
 	return r.eventTypeReconciler.Reconcile(ctx, source, args)
 }
 
-func (r *reconciler) newEventTypeReconcilerArgs(source *sourcesv1alpha1.GitHubSource) *eventtype.ReconcilerArgs {
+func (r *Reconciler) newEventTypeReconcilerArgs(source *sourcesv1alpha1.GitHubSource) *eventtype.ReconcilerArgs {
 	specs := make([]eventingv1alpha1.EventTypeSpec, 0)
 	for _, et := range source.Spec.EventTypes {
 		spec := eventingv1alpha1.EventTypeSpec{
@@ -369,20 +333,14 @@ func (r *reconciler) newEventTypeReconcilerArgs(source *sourcesv1alpha1.GitHubSo
 	}
 }
 
-func (r *reconciler) addFinalizer(s *sourcesv1alpha1.GitHubSource) {
+func (r *Reconciler) addFinalizer(s *sourcesv1alpha1.GitHubSource) {
 	finalizers := sets.NewString(s.Finalizers...)
 	finalizers.Insert(finalizerName)
 	s.Finalizers = finalizers.List()
 }
 
-func (r *reconciler) removeFinalizer(s *sourcesv1alpha1.GitHubSource) {
+func (r *Reconciler) removeFinalizer(s *sourcesv1alpha1.GitHubSource) {
 	finalizers := sets.NewString(s.Finalizers...)
 	finalizers.Delete(finalizerName)
 	s.Finalizers = finalizers.List()
-}
-
-func (r *reconciler) InjectClient(c client.Client) error {
-	r.client = c
-	r.eventTypeReconciler.Client = c
-	return nil
 }

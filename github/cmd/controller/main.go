@@ -17,53 +17,14 @@ limitations under the License.
 package main
 
 import (
-	"log"
+	"knative.dev/eventing-contrib/couchdb/source/pkg/reconciler"
+	"knative.dev/pkg/injection/sharedmain"
+)
 
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"knative.dev/eventing-contrib/github/pkg/apis"
-	controller "knative.dev/eventing-contrib/github/pkg/reconciler"
-	"knative.dev/pkg/logging/logkey"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/signals"
+var (
+	component = "github_controller_manager"
 )
 
 func main() {
-	logCfg := zap.NewProductionConfig()
-	logCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	logger, err := logCfg.Build()
-	logger = logger.With(zap.String(logkey.ControllerType, "github-controller-manager"))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Get a config to talk to the apiserver
-	cfg, err := config.GetConfig()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Create a new Cmd to provide shared dependencies and start components
-	mgr, err := manager.New(cfg, manager.Options{})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("Registering Components.")
-
-	// Setup Scheme for all resources
-	if err := apis.AddToScheme(mgr.GetScheme()); err != nil {
-		log.Fatal(err)
-	}
-
-	// Setup all Controllers
-	if err := controller.Add(mgr, logger.Sugar()); err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("Starting the Cmd.")
-
-	// Start the Cmd
-	log.Fatal(mgr.Start(signals.SetupSignalHandler()))
+	sharedmain.Main(component, reconciler.NewController)
 }

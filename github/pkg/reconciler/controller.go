@@ -10,10 +10,7 @@ import (
 	"log"
 	"os"
 
-	"k8s.io/client-go/kubernetes/scheme"
-
 	githubsourceinformer "knative.dev/eventing-contrib/github/pkg/client/injection/informers/sources/v1alpha1/githubsource"
-	sourcescheme "knative.dev/eventing-contrib/kafka/source/pkg/client/clientset/versioned/scheme"
 	secretinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/secret"
 	servingclient "knative.dev/serving/pkg/client/injection/client"
 	ksvcinformer "knative.dev/serving/pkg/client/injection/informers/serving/v1alpha1/service"
@@ -52,5 +49,12 @@ func NewController(
 		//eventTypeReconciler: eventtype.Reconciler{
 		//},
 	}
-	return controller.NewImpl(r, r.Logger, ReconcilerName)
+
+	impl := controller.NewImpl(r, r.Logger, ReconcilerName)
+
+	r.Logger.Info("Setting up event handlers")
+	// Required to register reconciliation of GithubSource
+	githubsourceInformer.Informer().AddEventHandler(controller.HandleAll(impl.Enqueue))
+
+	return impl
 }

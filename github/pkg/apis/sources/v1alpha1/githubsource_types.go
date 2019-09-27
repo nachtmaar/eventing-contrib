@@ -220,6 +220,3 @@ type GitHubSourceList struct {
 	Items           []GitHubSource `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&GitHubSource{}, &GitHubSourceList{})
-}

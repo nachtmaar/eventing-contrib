@@ -23,6 +23,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	githubsourcev1alph1ainformers "knative.dev/eventing-contrib/github/pkg/client/informers/externalversions/sources/v1alpha1"
 	"knative.dev/eventing/pkg/reconciler"
+	pkgLogging "knative.dev/pkg/logging"
+	"knative.dev/pkg/metrics"
+
 	// TODO(nachtmaar) check import names
 	servingv1alphalisters "knative.dev/serving/pkg/client/listers/serving/v1alpha1"
 
@@ -52,11 +55,15 @@ const (
 	controllerAgentName = "github-source-controller"
 	raImageEnvVar       = "GH_RA_IMAGE"
 	finalizerName       = controllerAgentName
+	component           = "githubsource"
 )
 
 // Reconciler reconciles a GitHubSource object
 type Reconciler struct {
 	*reconciler.Base
+
+	loggingContext context.Context
+	loggingConfig  *pkgLogging.Config
 
 	githubsourceInformer githubsourcev1alph1ainformers.GitHubSourceInformer
 	receiveAdapterImage  string
@@ -66,6 +73,8 @@ type Reconciler struct {
 	secretLister  v1.SecretLister
 	ksvcLister    servingv1alphalisters.ServiceLister
 	servingClient versioned.Interface
+
+	metricsConfig *metrics.ExporterOptions
 }
 
 type webhookArgs struct {
@@ -81,6 +90,8 @@ type webhookArgs struct {
 // object and makes changes based on the state read and what is in the
 // GitHubSource.Spec
 func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
+	// TODO(nachtmaar) remove
+	fmt.Println("reconcile")
 
 	// TODO(nachtmaar) why desugared logger
 	logger := logging.FromContext(ctx).Desugar()
@@ -360,4 +371,31 @@ func (r *Reconciler) removeFinalizer(s *sourcesv1alpha1.GitHubSource) {
 	finalizers := sets.NewString(s.Finalizers...)
 	finalizers.Delete(finalizerName)
 	s.Finalizers = finalizers.List()
+}
+
+func (r *Reconciler) UpdateFromLoggingConfigMap(cfg *corev1.ConfigMap) {
+	if cfg != nil {
+		delete(cfg.Data, "_example")
+	}
+
+	logcfg, err := pkgLogging.NewConfigFromConfigMap(cfg)
+	if err != nil {
+		logging.FromContext(r.loggingContext).Warn("failed to create logging config from configmap", zap.String("cfg.Name", cfg.Name))
+		return
+	}
+	r.loggingConfig = logcfg
+	logging.FromContext(r.loggingContext).Info("Update from logging ConfigMap", zap.Any("ConfigMap", cfg))
+}
+
+func (r *Reconciler) UpdateFromMetricsConfigMap(cfg *corev1.ConfigMap) {
+	if cfg != nil {
+		delete(cfg.Data, "_example")
+	}
+
+	r.metricsConfig = &metrics.ExporterOptions{
+		Domain:    metrics.Domain(),
+		Component: component,
+		ConfigMap: cfg.Data,
+	}
+	logging.FromContext(r.loggingContext).Info("Update from metrics ConfigMap", zap.Any("ConfigMap", cfg))
 }

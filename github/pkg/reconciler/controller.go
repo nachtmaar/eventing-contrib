@@ -6,6 +6,7 @@ import (
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
+	"knative.dev/pkg/metrics"
 
 	"log"
 	"os"
@@ -39,6 +40,7 @@ func NewController(
 	// TODO(nachtmaar): check if reconciler needs to be public
 	r := &Reconciler{
 		Base:                 reconciler.NewBase(ctx, controllerAgentName, cmw),
+		loggingContext:       ctx,
 		githubsourceInformer: githubsourceInformer,
 		secretLister:         secretLister,
 		ksvcLister:           ksvcLister,
@@ -56,5 +58,7 @@ func NewController(
 	// Required to register reconciliation of GithubSource
 	githubsourceInformer.Informer().AddEventHandler(controller.HandleAll(impl.Enqueue))
 
+	cmw.Watch(logging.ConfigMapName(), r.UpdateFromLoggingConfigMap)
+	cmw.Watch(metrics.ConfigMapName(), r.UpdateFromMetricsConfigMap)
 	return impl
 }

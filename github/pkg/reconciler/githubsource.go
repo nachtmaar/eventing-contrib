@@ -19,10 +19,13 @@ package reconciler
 import (
 	"context"
 	"fmt"
-	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
+	githubsourcev1alph1ainformers "knative.dev/eventing-contrib/github/pkg/client/informers/externalversions/sources/v1alpha1"
 	"knative.dev/eventing/pkg/reconciler"
-	"knative.dev/serving/pkg/client/listers/serving/v1alpha1"
+	// TODO(nachtmaar) check import names
+	servingv1alphalisters "knative.dev/serving/pkg/client/listers/serving/v1alpha1"
+
 	"strings"
 
 	"go.uber.org/zap"
@@ -31,12 +34,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
 	"knative.dev/pkg/logging"
 	servingv1alpha1 "knative.dev/serving/pkg/apis/serving/v1alpha1"
-	versioned "knative.dev/serving/pkg/client/clientset/versioned"
+	"knative.dev/serving/pkg/client/clientset/versioned"
 
 	sourcesv1alpha1 "knative.dev/eventing-contrib/github/pkg/apis/sources/v1alpha1"
 	"knative.dev/eventing-contrib/github/pkg/reconciler/resources"
@@ -56,13 +58,14 @@ const (
 type Reconciler struct {
 	*reconciler.Base
 
-	kubeClientSet       kubernetes.Clientset
-	receiveAdapterImage string
-	webhookClient       webhookClient
-	eventTypeReconciler eventtype.Reconciler
-	secretLister        v1.SecretLister
-	ksvcLister          v1alpha1.ServiceLister
-	servingClient       versioned.Interface
+	githubsourceInformer githubsourcev1alph1ainformers.GitHubSourceInformer
+	receiveAdapterImage  string
+	webhookClient        webhookClient
+	// TODO(nachtmaar): convert to pkg/controller too
+	//eventTypeReconciler eventtype.Reconciler
+	secretLister  v1.SecretLister
+	ksvcLister    servingv1alphalisters.ServiceLister
+	servingClient versioned.Interface
 }
 
 type webhookArgs struct {
@@ -77,27 +80,40 @@ type webhookArgs struct {
 // Reconcile reads that state of the cluster for a GitHubSource
 // object and makes changes based on the state read and what is in the
 // GitHubSource.Spec
-func (r *Reconciler) Reconcile(ctx context.Context, object runtime.Object) error {
-	logger := logging.FromContext(ctx)
+func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 
-	source, ok := object.(*sourcesv1alpha1.GitHubSource)
-	if !ok {
-		logger.Errorf("could not find github source %v\n", object)
+	// TODO(nachtmaar) why desugared logger
+	logger := logging.FromContext(ctx).Desugar()
+	// TODO(nachtmaar) remove
+	logger.Info("Reconcile", zap.Any("key", key))
+
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		logger.Error("invalid resource key: %s", zap.Any("key", key))
 		return nil
 	}
 
+	src, err := r.githubsourceInformer.Lister().GitHubSources(namespace).Get(name)
+	if apierrors.IsNotFound(err) {
+		logger.Error("could not find github source", zap.Any("key", key))
+	} else if err != nil {
+		return err
+	}
+
+	githubsource := src.DeepCopy()
+
 	// See if the source has been deleted
-	accessor, err := meta.Accessor(source)
+	accessor, err := meta.Accessor(githubsource)
 	if err != nil {
-		logger.Warnf("Failed to get metadata accessor: %s", zap.Error(err))
+		logger.Error("Failed to get metadata accessor", zap.Error(err))
 		return err
 	}
 
 	var reconcileErr error
 	if accessor.GetDeletionTimestamp() == nil {
-		reconcileErr = r.reconcile(ctx, source)
+		reconcileErr = r.reconcile(ctx, githubsource)
 	} else {
-		reconcileErr = r.finalize(ctx, source)
+		reconcileErr = r.finalize(ctx, githubsource)
 	}
 
 	return reconcileErr
@@ -172,10 +188,11 @@ func (r *Reconciler) reconcile(ctx context.Context, source *sourcesv1alpha1.GitH
 		return nil
 	}
 
-	err = r.reconcileEventTypes(ctx, source)
-	if err != nil {
-		return err
-	}
+	//TODO(nachtmaar)
+	//err = r.reconcileEventTypes(ctx, source)
+	//if err != nil {
+	//	return err
+	//}
 	source.Status.MarkEventTypes()
 
 	return nil
@@ -310,10 +327,10 @@ func (r *Reconciler) getOwnedService(ctx context.Context, source *sourcesv1alpha
 	return nil, apierrors.NewNotFound(servingv1alpha1.Resource("services"), "")
 }
 
-func (r *Reconciler) reconcileEventTypes(ctx context.Context, source *sourcesv1alpha1.GitHubSource) error {
-	args := r.newEventTypeReconcilerArgs(source)
-	return r.eventTypeReconciler.Reconcile(ctx, source, args)
-}
+//func (r *Reconciler) reconcileEventTypes(ctx context.Context, source *sourcesv1alpha1.GitHubSource) error {
+//	args := r.newEventTypeReconcilerArgs(source)
+//	return r.eventTypeReconciler.Reconcile(ctx, source, args)
+//}
 
 func (r *Reconciler) newEventTypeReconcilerArgs(source *sourcesv1alpha1.GitHubSource) *eventtype.ReconcilerArgs {
 	specs := make([]eventingv1alpha1.EventTypeSpec, 0)

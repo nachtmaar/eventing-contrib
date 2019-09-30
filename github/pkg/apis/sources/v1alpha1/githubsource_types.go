@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -209,6 +210,10 @@ type GitHubSource struct {
 
 	Spec   GitHubSourceSpec   `json:"spec,omitempty"`
 	Status GitHubSourceStatus `json:"status,omitempty"`
+}
+
+func (s *GitHubSource) GetGroupVersionKind() schema.GroupVersionKind {
+	return SchemeGroupVersion.WithKind("GitHubSource")
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

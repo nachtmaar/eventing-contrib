@@ -18,6 +18,7 @@ package resources
 
 import (
 	"fmt"
+	"knative.dev/pkg/kmeta"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,6 +58,9 @@ func MakeService(source *sourcesv1alpha1.GitHubSource, receiveAdapterImage strin
 			GenerateName: fmt.Sprintf("%s-", source.Name),
 			Namespace:    source.Namespace,
 			Labels:       labels,
+			OwnerReferences: []metav1.OwnerReference{
+				*kmeta.NewControllerRef(source),
+			},
 		},
 		Spec: servingv1alpha1.ServiceSpec{
 			ConfigurationSpec: servingv1alpha1.ConfigurationSpec{

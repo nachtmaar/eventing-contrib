@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"knative.dev/eventing/pkg/duck"
 	"knative.dev/eventing/pkg/reconciler"
@@ -21,6 +22,7 @@ import (
 	secretinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/secret"
 	servingclient "knative.dev/serving/pkg/client/injection/client"
 	ksvcinformer "knative.dev/serving/pkg/client/injection/informers/serving/v1alpha1/service"
+	sourcescheme "knative.dev/eventing-contrib/kafka/source/pkg/client/clientset/versioned/scheme"
 )
 
 const (
@@ -49,15 +51,15 @@ func NewController(
 
 	// TODO(nachtmaar): check if reconciler needs to be public
 	r := &Reconciler{
-		Base:                 reconciler.NewBase(ctx, controllerAgentName, cmw),
-		loggingContext:       ctx,
-		githubClientSet:      githubClientSet,
-		githubsourceInformer: githubsourceInformer,
-		secretLister:         secretLister,
-		ksvcLister:           ksvcLister,
-		servingClient:        servingClient,
-		receiveAdapterImage:  receiveAdapterImage,
-		webhookClient:        gitHubWebhookClient{},
+		Base:                   reconciler.NewBase(ctx, controllerAgentName, cmw),
+		loggingContext:         ctx,
+		githubSourcesClientSet: githubClientSet,
+		githubsourceInformer:   githubsourceInformer,
+		secretLister:           secretLister,
+		ksvcLister:             ksvcLister,
+		servingClient:          servingClient,
+		receiveAdapterImage:    receiveAdapterImage,
+		webhookClient:          gitHubWebhookClient{},
 	}
 
 	impl := controller.NewImpl(r, r.Logger, ReconcilerName)
@@ -76,6 +78,7 @@ func NewController(
 		FilterFunc: controller.Filter(v1alpha1.SchemeGroupVersion.WithKind("GitHubSource")),
 		Handler:    controller.HandleAll(impl.EnqueueControllerOf),
 	})
+
 	ksvcInformer.AddEventHandler(cache.FilteringResourceEventHandler{
 		FilterFunc: controller.Filter(v1alpha1.SchemeGroupVersion.WithKind("GitHubSource")),
 		Handler:    controller.HandleAll(impl.EnqueueControllerOf),
@@ -86,4 +89,8 @@ func NewController(
 	cmw.Watch(metrics.ConfigMapName(), r.UpdateFromMetricsConfigMap)
 
 	return impl
+}
+
+func init() {
+	sourcescheme.AddToScheme(scheme.Scheme)
 }

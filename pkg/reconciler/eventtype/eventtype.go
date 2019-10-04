@@ -19,8 +19,6 @@ package eventtype
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 
@@ -28,15 +26,14 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // Reconciler is a helper struct that can be used by any source in order to reconcile its EventTypes.
 type Reconciler struct {
-	// KubeClientSet allows us to talk to the k8s for core APIs
-	KubeClientSet kubernetes.Interface
-
 	Client client.Client
 	Scheme *runtime.Scheme
 }
@@ -64,7 +61,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, owner metav1.Object, args *R
 	toCreate, toDelete := r.computeDiff(current, expected)
 
 	for _, eventType := range toDelete {
-		// TODO(nachtmaar) use kubeclientset
 		err = r.Client.Delete(ctx, &eventType)
 		if err != nil {
 			return err
@@ -72,7 +68,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, owner metav1.Object, args *R
 	}
 
 	for _, eventType := range toCreate {
-		// TODO(nachtmaar) use kubeclientset
 		err = r.Client.Create(ctx, &eventType)
 		if err != nil {
 			return err
@@ -92,8 +87,7 @@ func (r *Reconciler) getEventTypes(ctx context.Context, namespace string, lbs ma
 	}
 
 	el := &eventingv1alpha1.EventTypeList{}
-	// TODO(nachtmaar) use EventTypeList informer
-	if err := r.Client.List(ctx, opts, el); err != nil {
+	if err := r.Client.List(ctx, el, opts); err != nil {
 		return nil, err
 	}
 
@@ -118,11 +112,10 @@ func (r *Reconciler) makeEventTypes(args *ReconcilerArgs, owner metav1.Object) (
 
 	for _, spec := range args.Specs {
 		eventType := resources.MakeEventType(spec, args.Namespace, args.Labels)
-		// TODO(nachtmaar) still required ?
 		// Setting the reference to delete the EventType upon uninstalling the source.
-		//if err := controllerutil.SetControllerReference(owner, &eventType, r.Scheme); err != nil {
-		//	return nil, err
-		//}
+		if err := controllerutil.SetControllerReference(owner, &eventType, r.Scheme); err != nil {
+			return nil, err
+		}
 		eventTypes = append(eventTypes, eventType)
 	}
 	return eventTypes, nil

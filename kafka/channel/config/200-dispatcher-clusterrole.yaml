@@ -27,6 +27,7 @@ rules:
       - get
       - list
       - watch
+      - patch
   - apiGroups:
       - messaging.knative.dev
     resources:
@@ -34,11 +35,38 @@ rules:
     verbs:
       - get
       - update
+      - patch
   - apiGroups:
       - "" # Core API group.
+    resources:
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+      - create
+  - apiGroups:
+      - messaging.knative.dev
+    resources:
+      - kafkachannels
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+  - apiGroups:
+      - ""
     resources:
       - configmaps
     verbs:
       - get
       - list
       - watch
+  - apiGroups:
+      - "" # Core API Group.
+    resources:
+      - events
+    verbs:
+      - create
+      - patch

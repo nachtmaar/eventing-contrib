@@ -18,29 +18,29 @@ package reconciler
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"knative.dev/eventing/pkg/duck"
+	"knative.dev/eventing/pkg/reconciler"
+	"knative.dev/pkg/configmap"
+	"knative.dev/pkg/controller"
 	"strings"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
-	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
-	"knative.dev/pkg/apis"
-	duckv1 "knative.dev/pkg/apis/duck/v1"
-	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
-	servingv1alpha1 "knative.dev/serving/pkg/apis/serving/v1alpha1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	sourcesv1alpha1 "knative.dev/eventing-contrib/github/pkg/apis/sources/v1alpha1"
 	"knative.dev/eventing-contrib/github/pkg/reconciler/resources"
-	controllertesting "knative.dev/eventing-contrib/pkg/controller/testing"
-	"knative.dev/eventing-contrib/pkg/reconciler/eventtype"
+	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	. "knative.dev/eventing/pkg/reconciler/testing"
+	"knative.dev/pkg/apis"
+	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
+	logtesting "knative.dev/pkg/logging/testing"
+	. "knative.dev/pkg/reconciler/testing"
+	servingv1alpha1 "knative.dev/serving/pkg/apis/serving/v1alpha1"
 )
 
 var (
@@ -91,799 +91,803 @@ func init() {
 	eventingv1alpha1.AddToScheme(scheme.Scheme)
 }
 
-var testCases = []controllertesting.TestCase{
+var table = TableTest{
 	{
-		Name:         "non existent key",
-		Reconciles:   &sourcesv1alpha1.GitHubSource{},
-		ReconcileKey: "non-existent-test-ns/non-existent-test-key",
-		WantErr:      false,
-	}, {
-		Name:       "valid githubsource, but sink does not exist",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			getGitHubSource(),
-			getGitHubSecrets(),
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		WantErrMsg:   `sinks.duck.knative.dev "testsink" not found`,
-	}, {
-		Name:       "valid githubsource, but sink is not addressable",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			getGitHubSourceUnaddressable(),
-			getGitHubSecrets(),
-			getAddressableNoStatus(),
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSourceUnaddressable()
-				s.Status.ObservedGeneration = generation
-				s.Status.MarkSecrets()
-				s.Status.MarkNoSink("NotFound", `sink "testnamespace/testunaddressable" (duck.knative.dev/v1alpha1, Kind=KResource) does not contain address`)
-				return s
-			}(),
-		},
-		WantErrMsg:  `sink "testnamespace/testunaddressable" (duck.knative.dev/v1alpha1, Kind=KResource) does not contain address`,
-		IgnoreTimes: true,
-	}, {
-		Name:       "valid githubsource, sink is addressable",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			getGitHubSource(),
-			getGitHubSecrets(),
-			getAddressable(),
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkSink(addressableURI)
-				s.Status.MarkSecrets()
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "valid githubsource, sink is addressable but sink is nil",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			getGitHubSource(),
-			getGitHubSecrets(),
-			getAddressableNilAddress(),
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkNoSink("NotFound", "sink \"testnamespace/testsink\" (duck.knative.dev/v1alpha1, Kind=Sink) does not contain address")
-				s.Status.MarkSecrets()
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-		WantErrMsg:  `sink "testnamespace/testsink" (duck.knative.dev/v1alpha1, Kind=Sink) does not contain address`,
-	}, {
-		Name:       "invalid githubsource, sink is nil",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.Spec.Sink = nil
-				return s
-			}(),
-			getGitHubSecrets(),
-			getAddressable(),
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.Spec.Sink = nil
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkNoSink("NotFound", "sink ref is nil")
-				s.Status.MarkSecrets()
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-		WantErrMsg:  `sink ref is nil`,
-	}, {
-		Name:       "valid githubsource, repo webhook created",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				return s
-			}(),
-			// service resource
-			func() runtime.Object {
-				svc := &servingv1alpha1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: testNS,
-						Name:      serviceName,
-					},
-					Status: servingv1alpha1.ServiceStatus{
-						Status: duckv1.Status{
-							Conditions: duckv1.Conditions{{
-								Type:   servingv1alpha1.ServiceConditionReady,
-								Status: corev1.ConditionTrue,
-							}},
-						},
-						RouteStatusFields: servingv1alpha1.RouteStatusFields{
-							URL: &serviceURL,
-						},
-					},
-				}
-				svc.SetOwnerReferences(getOwnerReferences())
-				return svc
-			}(),
-			getGitHubSecrets(),
-			getAddressable(),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myuser",
-				expectedRepo:  "myproject",
-				hookID:        "repohookid",
+		Name:    "non existent key",
+		Key:     "non-existent-test-ns/non-existent-test-key",
+		WantErr: false,
+		Objects: []runtime.Object{&sourcesv1alpha1.GitHubSource{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "foo",
+				Namespace: "bar",
 			},
+			Spec: sourcesv1alpha1.GitHubSourceSpec{},
 		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkSink(addressableURI)
-				s.Status.MarkSecrets()
-				s.Status.WebhookIDKey = "repohookid"
-				s.Status.MarkEventTypes()
-				return s
-			}(),
 		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "valid githubsource, secure repo webhook created",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.Spec.Secure = true
-				return s
-			}(),
-			// service resource
-			func() runtime.Object {
-				svc := &servingv1alpha1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: testNS,
-						Name:      serviceName,
-					},
-					Status: servingv1alpha1.ServiceStatus{
-						Status: duckv1.Status{
-							Conditions: duckv1.Conditions{{
-								Type:   servingv1alpha1.ServiceConditionReady,
-								Status: corev1.ConditionTrue,
-							}},
-						},
-						RouteStatusFields: servingv1alpha1.RouteStatusFields{
-							URL: &serviceURL,
-						},
-					},
-				}
-				svc.SetOwnerReferences(getOwnerReferences())
-				return svc
-			}(),
-			getGitHubSecrets(),
-			getAddressable(),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner:  "myuser",
-				expectedRepo:   "myproject",
-				expectedSecure: true,
-				hookID:         "repohookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.Spec.Secure = true
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkSink(addressableURI)
-				s.Status.MarkSecrets()
-				s.Status.WebhookIDKey = "repohookid"
-				s.Status.MarkEventTypes()
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "valid githubsource, org webhook created",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.Spec.OwnerAndRepository = "myorganization"
-				return s
-			}(),
-			// service resource
-			func() runtime.Object {
-				svc := &servingv1alpha1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: testNS,
-						Name:      serviceName,
-					},
-					Status: servingv1alpha1.ServiceStatus{
-						Status: duckv1.Status{
-							Conditions: duckv1.Conditions{{
-								Type:   servingv1alpha1.ServiceConditionReady,
-								Status: corev1.ConditionTrue,
-							}},
-						},
-						RouteStatusFields: servingv1alpha1.RouteStatusFields{
-							URL: &serviceURL,
-						},
-					},
-				}
-				svc.SetOwnerReferences(getOwnerReferences())
-				return svc
-			}(),
-			getGitHubSecrets(),
-			getAddressable(),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myorganization",
-				hookID:        "orghookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.Status.ObservedGeneration = generation
-				s.Spec.OwnerAndRepository = "myorganization"
-				s.Status.InitializeConditions()
-				s.Status.MarkSink(addressableURI)
-				s.Status.MarkSecrets()
-				s.Status.WebhookIDKey = "orghookid"
-				s.Status.MarkEventTypes()
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "invalid githubsource, secret does not exist",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			getGitHubSource(),
-			getAddressable(),
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkNoSecrets("AccessTokenNotFound",
-					fmt.Sprintf(`secrets "%s" not found`, secretName))
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-		WantErrMsg:  fmt.Sprintf(`secrets "%s" not found`, secretName),
-	}, {
-		Name:       "invalid githubsource, secret key ref does not exist",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			getGitHubSource(),
-			getAddressable(),
-			&corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: testNS,
-					Name:      secretName,
-				},
-				Data: map[string][]byte{
-					accessTokenKey: []byte("foo"),
-				},
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkNoSecrets("SecretTokenNotFound",
-					fmt.Sprintf(`key "%s" not found in secret "%s"`, secretTokenKey, secretName))
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-		WantErrMsg:  fmt.Sprintf(`key "%s" not found in secret "%s"`, secretTokenKey, secretName),
-	}, {
-		Name:       "valid githubsource, deleted",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.DeletionTimestamp = &now
-				s.Status.WebhookIDKey = "repohookid"
-				return s
-			}(),
-			// service resource
-			func() runtime.Object {
-				svc := &servingv1alpha1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: testNS,
-						Name:      serviceName,
-					},
-					Status: servingv1alpha1.ServiceStatus{
-						Status: duckv1.Status{
-							Conditions: duckv1.Conditions{{
-								Type:   servingv1alpha1.ServiceConditionReady,
-								Status: corev1.ConditionTrue,
-							}},
-						},
-						RouteStatusFields: servingv1alpha1.RouteStatusFields{
-							URL: &serviceURL,
-						},
-					},
-				}
-				svc.SetOwnerReferences(getOwnerReferences())
-				return svc
-			}(),
-			getGitHubSecrets(),
-			getAddressable(),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myuser",
-				expectedRepo:  "myproject",
-				hookID:        "repohookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.DeletionTimestamp = &now
-				s.Status.WebhookIDKey = ""
-				s.Finalizers = nil
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "valid githubsource, deleted, missing addressable",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.DeletionTimestamp = &now
-				s.Status.WebhookIDKey = "repohookid"
-				return s
-			}(),
-			getGitHubSecrets(),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myuser",
-				expectedRepo:  "myproject",
-				hookID:        "repohookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.DeletionTimestamp = &now
-				s.Status.WebhookIDKey = ""
-				s.Finalizers = nil
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "valid githubsource, deleted, missing secret",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.DeletionTimestamp = &now
-				s.Status.WebhookIDKey = "repohookid"
-				return s
-			}(),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myuser",
-				expectedRepo:  "myproject",
-				hookID:        "repohookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.Status.MarkNoSecrets("AccessTokenNotFound", "%s", fmt.Errorf("secrets %q not found", secretName))
-				s.DeletionTimestamp = &now
-				s.Status.WebhookIDKey = "repohookid"
-				s.Finalizers = nil
-				return s
-			}(),
-			//TODO check for Event
-			// Type: Warning
-			// Reason: FailedFinalize
-			// Message: Could not delete webhook "repohookid": secrets "testsecret" not found
-		},
-		IgnoreTimes: true,
-		WantErrMsg:  fmt.Sprintf("secrets %q not found", secretName),
-	}, {
-		Name:       "valid githubsource with specified baseURL, repo webhook created",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubEnterpriseSource()
-				s.UID = gitHubSourceUID
-				return s
-			}(),
-			// service resource
-			func() runtime.Object {
-				svc := &servingv1alpha1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: testNS,
-						Name:      serviceName,
-					},
-					Status: servingv1alpha1.ServiceStatus{
-						Status: duckv1.Status{
-							Conditions: duckv1.Conditions{{
-								Type:   servingv1alpha1.ServiceConditionReady,
-								Status: corev1.ConditionTrue,
-							}},
-						},
-						RouteStatusFields: servingv1alpha1.RouteStatusFields{
-							URL: &serviceURL,
-						},
-					},
-				}
-				svc.SetOwnerReferences(getOwnerReferences())
-				return svc
-			}(),
-			getGitHubSecrets(),
-			getAddressable(),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myuser",
-				expectedRepo:  "myproject",
-				hookID:        "repohookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubEnterpriseSource()
-				s.UID = gitHubSourceUID
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkSink(addressableURI)
-				s.Status.MarkSecrets()
-				s.Status.WebhookIDKey = "repohookid"
-				s.Status.MarkEventTypes()
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "valid githubsource with specified baseURL, deleted",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubEnterpriseSource()
-				s.UID = gitHubSourceUID
-				s.DeletionTimestamp = &now
-				s.Status.WebhookIDKey = "repohookid"
-				return s
-			}(),
-			// service resource
-			func() runtime.Object {
-				svc := &servingv1alpha1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: testNS,
-						Name:      serviceName,
-					},
-					Status: servingv1alpha1.ServiceStatus{
-						Status: duckv1.Status{
-							Conditions: duckv1.Conditions{{
-								Type:   servingv1alpha1.ServiceConditionReady,
-								Status: corev1.ConditionTrue,
-							}},
-						},
-						RouteStatusFields: servingv1alpha1.RouteStatusFields{
-							URL: &serviceURL,
-						},
-					},
-				}
-				svc.SetOwnerReferences(getOwnerReferences())
-				return svc
-			}(),
-			getGitHubSecrets(),
-			getAddressable(),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myuser",
-				expectedRepo:  "myproject",
-				hookID:        "repohookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubEnterpriseSource()
-				s.UID = gitHubSourceUID
-				s.DeletionTimestamp = &now
-				s.Status.WebhookIDKey = ""
-				s.Finalizers = nil
-				return s
-			}(),
-		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "valid githubsource with event types created",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubEnterpriseSource()
-				s.UID = gitHubSourceUID
-				s.Spec.Sink.Kind = brokerKind
-				return s
-			}(),
-			// service resource
-			func() runtime.Object {
-				svc := &servingv1alpha1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: testNS,
-						Name:      serviceName,
-					},
-					Status: servingv1alpha1.ServiceStatus{
-						Status: duckv1.Status{
-							Conditions: duckv1.Conditions{{
-								Type:   servingv1alpha1.ServiceConditionReady,
-								Status: corev1.ConditionTrue,
-							}},
-						},
-						RouteStatusFields: servingv1alpha1.RouteStatusFields{
-							URL: &serviceURL,
-						},
-					},
-				}
-				svc.SetOwnerReferences(getOwnerReferences())
-				return svc
-			}(),
-			getGitHubSecrets(),
-			getAddressableWithKind(brokerKind),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myuser",
-				expectedRepo:  "myproject",
-				hookID:        "repohookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubEnterpriseSource()
-				s.UID = gitHubSourceUID
-				s.Status.ObservedGeneration = generation
-				s.Spec.Sink.Kind = brokerKind
-				s.Status.InitializeConditions()
-				s.Status.MarkSink(addressableURI)
-				s.Status.MarkSecrets()
-				s.Status.WebhookIDKey = "repohookid"
-				s.Status.MarkEventTypes()
-				return s
-			}(),
-			getEventType(),
-		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "valid githubsource delete event type",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				return s
-			}(),
-			// service resource
-			func() runtime.Object {
-				svc := &servingv1alpha1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: testNS,
-						Name:      serviceName,
-					},
-					Status: servingv1alpha1.ServiceStatus{
-						Status: duckv1.Status{
-							Conditions: duckv1.Conditions{{
-								Type:   servingv1alpha1.ServiceConditionReady,
-								Status: corev1.ConditionTrue,
-							}},
-						},
-						RouteStatusFields: servingv1alpha1.RouteStatusFields{
-							URL: &serviceURL,
-						},
-					},
-				}
-				svc.SetOwnerReferences(getOwnerReferences())
-				return svc
-			}(),
-			getGitHubSecrets(),
-			getAddressable(),
-			getEventType(),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myuser",
-				expectedRepo:  "myproject",
-				hookID:        "repohookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubSource()
-				s.UID = gitHubSourceUID
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkSink(addressableURI)
-				s.Status.MarkSecrets()
-				s.Status.WebhookIDKey = "repohookid"
-				s.Status.MarkEventTypes()
-				return s
-			}(),
-		},
-		WantAbsent: []runtime.Object{
-			getEventType(),
-		},
-		IgnoreTimes: true,
-	}, {
-		Name:       "githubsource cannot create event types",
-		Reconciles: &sourcesv1alpha1.GitHubSource{},
-		InitialState: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubEnterpriseSource()
-				s.UID = gitHubSourceUID
-				s.Spec.Sink.Kind = brokerKind
-				return s
-			}(),
-			// service resource
-			func() runtime.Object {
-				svc := &servingv1alpha1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: testNS,
-						Name:      serviceName,
-					},
-					Status: servingv1alpha1.ServiceStatus{
-						Status: duckv1.Status{
-							Conditions: duckv1.Conditions{{
-								Type:   servingv1alpha1.ServiceConditionReady,
-								Status: corev1.ConditionTrue,
-							}},
-						},
-						RouteStatusFields: servingv1alpha1.RouteStatusFields{
-							URL: &serviceURL,
-						},
-					},
-				}
-				svc.SetOwnerReferences(getOwnerReferences())
-				return svc
-			}(),
-			getGitHubSecrets(),
-			getAddressableWithKind(brokerKind),
-		},
-		OtherTestData: map[string]interface{}{
-			webhookData: webhookCreatorData{
-				expectedOwner: "myuser",
-				expectedRepo:  "myproject",
-				hookID:        "repohookid",
-			},
-		},
-		ReconcileKey: fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
-		Scheme:       scheme.Scheme,
-		Mocks: controllertesting.Mocks{
-			MockCreates: []controllertesting.MockCreate{
-				func(_ client.Client, _ context.Context, obj runtime.Object, _ ...client.CreateOption) (controllertesting.MockHandled, error) {
-					if _, ok := obj.(*eventingv1alpha1.EventType); ok {
-						return controllertesting.Handled, errors.New("test-induced-error")
-					}
-					return controllertesting.Unhandled, nil
-				},
-			},
-		},
-		WantPresent: []runtime.Object{
-			func() runtime.Object {
-				s := getGitHubEnterpriseSource()
-				s.UID = gitHubSourceUID
-				s.Spec.Sink.Kind = brokerKind
-				s.Status.ObservedGeneration = generation
-				s.Status.InitializeConditions()
-				s.Status.MarkSink(addressableURI)
-				s.Status.MarkSecrets()
-				s.Status.WebhookIDKey = "repohookid"
-				return s
-			}(),
-		},
-		WantAbsent: []runtime.Object{
-			getEventType(),
-		},
-		WantErrMsg:  "test-induced-error",
-		IgnoreTimes: true,
 	},
+	//{
+	//	Name: "valid githubsource, but sink does not exist",
+	//
+	//	Objects: []runtime.Object{
+	//		getGitHubSource(),
+	//		getGitHubSecrets(),
+	//	},
+	//	Key:        fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//	// TODO: use WantEvents ? : `sinks.duck.knative.dev "testsink" not found`,
+	//}, {
+	//	Name: "valid githubsource, but sink is not addressable",
+	//
+	//	Objects: []runtime.Object{
+	//		getGitHubSourceUnaddressable(),
+	//		getGitHubSecrets(),
+	//		getAddressableNoStatus(),
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSourceUnaddressable()
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.MarkSecrets()
+	//			s.Status.MarkNoSink("NotFound", `sink "testnamespace/testunaddressable" (duck.knative.dev/v1alpha1, Kind=KResource) does not contain address`)
+	//			return s
+	//		}(),
+	//	},
+	//	// TODO: use WantEvents ? WantErrMsg:  `sink "testnamespace/testunaddressable" (duck.knative.dev/v1alpha1, Kind=KResource) does not contain address`,
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "valid githubsource, sink is addressable",
+	//
+	//	Objects: []runtime.Object{
+	//		getGitHubSource(),
+	//		getGitHubSecrets(),
+	//		getAddressable(),
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkSink(addressableURI)
+	//			s.Status.MarkSecrets()
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "valid githubsource, sink is addressable but sink is nil",
+	//
+	//	Objects: []runtime.Object{
+	//		getGitHubSource(),
+	//		getGitHubSecrets(),
+	//		getAddressableNilAddress(),
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkNoSink("NotFound", "sink \"testnamespace/testsink\" (duck.knative.dev/v1alpha1, Kind=Sink) does not contain address")
+	//			s.Status.MarkSecrets()
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//	// TODO: use WantEvents ? WantErrMsg:  `sink "testnamespace/testsink" (duck.knative.dev/v1alpha1, Kind=Sink) does not contain address`,
+	//}, {
+	//	Name: "invalid githubsource, sink is nil",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.Spec.Sink = nil
+	//			return s
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressable(),
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.Spec.Sink = nil
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkNoSink("NotFound", "sink ref is nil")
+	//			s.Status.MarkSecrets()
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//	// TODO: use WantEvents ? WantErrMsg:  `sink ref is nil`,
+	//}, {
+	//	Name: "valid githubsource, repo webhook created",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			return s
+	//		}(),
+	//		// service resource
+	//		func() runtime.Object {
+	//			svc := &servingv1alpha1.Service{
+	//				ObjectMeta: metav1.ObjectMeta{
+	//					Namespace: testNS,
+	//					Name:      serviceName,
+	//				},
+	//				Status: servingv1alpha1.ServiceStatus{
+	//					Status: duckv1beta1.Status{
+	//						Conditions: duckv1beta1.Conditions{{
+	//							Type:   servingv1alpha1.ServiceConditionReady,
+	//							Status: corev1.ConditionTrue,
+	//						}},
+	//					},
+	//					RouteStatusFields: servingv1alpha1.RouteStatusFields{
+	//						URL: &serviceURL,
+	//					},
+	//				},
+	//			}
+	//			svc.SetOwnerReferences(getOwnerReferences())
+	//			return svc
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressable(),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myuser",
+	//			expectedRepo:  "myproject",
+	//			hookID:        "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkSink(addressableURI)
+	//			s.Status.MarkSecrets()
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			s.Status.MarkEventTypes()
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "valid githubsource, secure repo webhook created",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Spec.Secure = true
+	//			return s
+	//		}(),
+	//		// service resource
+	//		func() runtime.Object {
+	//			svc := &servingv1alpha1.Service{
+	//				ObjectMeta: metav1.ObjectMeta{
+	//					Namespace: testNS,
+	//					Name:      serviceName,
+	//				},
+	//				Status: servingv1alpha1.ServiceStatus{
+	//					Status: duckv1beta1.Status{
+	//						Conditions: duckv1beta1.Conditions{{
+	//							Type:   servingv1alpha1.ServiceConditionReady,
+	//							Status: corev1.ConditionTrue,
+	//						}},
+	//					},
+	//					RouteStatusFields: servingv1alpha1.RouteStatusFields{
+	//						URL: &serviceURL,
+	//					},
+	//				},
+	//			}
+	//			svc.SetOwnerReferences(getOwnerReferences())
+	//			return svc
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressable(),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner:  "myuser",
+	//			expectedRepo:   "myproject",
+	//			expectedSecure: true,
+	//			hookID:         "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Spec.Secure = true
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkSink(addressableURI)
+	//			s.Status.MarkSecrets()
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			s.Status.MarkEventTypes()
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "valid githubsource, org webhook created",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Spec.OwnerAndRepository = "myorganization"
+	//			return s
+	//		}(),
+	//		// service resource
+	//		func() runtime.Object {
+	//			svc := &servingv1alpha1.Service{
+	//				ObjectMeta: metav1.ObjectMeta{
+	//					Namespace: testNS,
+	//					Name:      serviceName,
+	//				},
+	//				Status: servingv1alpha1.ServiceStatus{
+	//					Status: duckv1beta1.Status{
+	//						Conditions: duckv1beta1.Conditions{{
+	//							Type:   servingv1alpha1.ServiceConditionReady,
+	//							Status: corev1.ConditionTrue,
+	//						}},
+	//					},
+	//					RouteStatusFields: servingv1alpha1.RouteStatusFields{
+	//						URL: &serviceURL,
+	//					},
+	//				},
+	//			}
+	//			svc.SetOwnerReferences(getOwnerReferences())
+	//			return svc
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressable(),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myorganization",
+	//			hookID:        "orghookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Status.ObservedGeneration = generation
+	//			s.Spec.OwnerAndRepository = "myorganization"
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkSink(addressableURI)
+	//			s.Status.MarkSecrets()
+	//			s.Status.WebhookIDKey = "orghookid"
+	//			s.Status.MarkEventTypes()
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "invalid githubsource, secret does not exist",
+	//
+	//	Objects: []runtime.Object{
+	//		getGitHubSource(),
+	//		getAddressable(),
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkNoSecrets("AccessTokenNotFound",
+	//				fmt.Sprintf(`secrets "%s" not found`, secretName))
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//	// TODO: use WantEvents ? WantErrMsg:  fmt.Sprintf(`secrets "%s" not found`, secretName),
+	//}, {
+	//	Name: "invalid githubsource, secret key ref does not exist",
+	//
+	//	Objects: []runtime.Object{
+	//		getGitHubSource(),
+	//		getAddressable(),
+	//		&corev1.Secret{
+	//			ObjectMeta: metav1.ObjectMeta{
+	//				Namespace: testNS,
+	//				Name:      secretName,
+	//			},
+	//			Data: map[string][]byte{
+	//				accessTokenKey: []byte("foo"),
+	//			},
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkNoSecrets("SecretTokenNotFound",
+	//				fmt.Sprintf(`key "%s" not found in secret "%s"`, secretTokenKey, secretName))
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//	// TODO: use WantEvents ? WantErrMsg:  fmt.Sprintf(`key "%s" not found in secret "%s"`, secretTokenKey, secretName),
+	//}, {
+	//	Name: "valid githubsource, deleted",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.DeletionTimestamp = &now
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			return s
+	//		}(),
+	//		// service resource
+	//		func() runtime.Object {
+	//			svc := &servingv1alpha1.Service{
+	//				ObjectMeta: metav1.ObjectMeta{
+	//					Namespace: testNS,
+	//					Name:      serviceName,
+	//				},
+	//				Status: servingv1alpha1.ServiceStatus{
+	//					Status: duckv1beta1.Status{
+	//						Conditions: duckv1beta1.Conditions{{
+	//							Type:   servingv1alpha1.ServiceConditionReady,
+	//							Status: corev1.ConditionTrue,
+	//						}},
+	//					},
+	//					RouteStatusFields: servingv1alpha1.RouteStatusFields{
+	//						URL: &serviceURL,
+	//					},
+	//				},
+	//			}
+	//			svc.SetOwnerReferences(getOwnerReferences())
+	//			return svc
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressable(),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myuser",
+	//			expectedRepo:  "myproject",
+	//			hookID:        "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.DeletionTimestamp = &now
+	//			s.Status.WebhookIDKey = ""
+	//			s.Finalizers = nil
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "valid githubsource, deleted, missing addressable",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.DeletionTimestamp = &now
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			return s
+	//		}(),
+	//		getGitHubSecrets(),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myuser",
+	//			expectedRepo:  "myproject",
+	//			hookID:        "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.DeletionTimestamp = &now
+	//			s.Status.WebhookIDKey = ""
+	//			s.Finalizers = nil
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "valid githubsource, deleted, missing secret",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.DeletionTimestamp = &now
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			return s
+	//		}(),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myuser",
+	//			expectedRepo:  "myproject",
+	//			hookID:        "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Status.MarkNoSecrets("AccessTokenNotFound", "%s", fmt.Errorf("secrets %q not found", secretName))
+	//			s.DeletionTimestamp = &now
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			s.Finalizers = nil
+	//			return s
+	//		}(),
+	//		//TODO check for Event
+	//		// Type: Warning
+	//		// Reason: FailedFinalize
+	//		// Message: Could not delete webhook "repohookid": secrets "testsecret" not found
+	//	},
+	//	IgnoreTimes: true,
+	//	// TODO: use WantEvents ? WantErrMsg:  fmt.Sprintf("secrets %q not found", secretName),
+	//}, {
+	//	Name: "valid githubsource with specified baseURL, repo webhook created",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubEnterpriseSource()
+	//			s.UID = gitHubSourceUID
+	//			return s
+	//		}(),
+	//		// service resource
+	//		func() runtime.Object {
+	//			svc := &servingv1alpha1.Service{
+	//				ObjectMeta: metav1.ObjectMeta{
+	//					Namespace: testNS,
+	//					Name:      serviceName,
+	//				},
+	//				Status: servingv1alpha1.ServiceStatus{
+	//					Status: duckv1beta1.Status{
+	//						Conditions: duckv1beta1.Conditions{{
+	//							Type:   servingv1alpha1.ServiceConditionReady,
+	//							Status: corev1.ConditionTrue,
+	//						}},
+	//					},
+	//					RouteStatusFields: servingv1alpha1.RouteStatusFields{
+	//						URL: &serviceURL,
+	//					},
+	//				},
+	//			}
+	//			svc.SetOwnerReferences(getOwnerReferences())
+	//			return svc
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressable(),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myuser",
+	//			expectedRepo:  "myproject",
+	//			hookID:        "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubEnterpriseSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkSink(addressableURI)
+	//			s.Status.MarkSecrets()
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			s.Status.MarkEventTypes()
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "valid githubsource with specified baseURL, deleted",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubEnterpriseSource()
+	//			s.UID = gitHubSourceUID
+	//			s.DeletionTimestamp = &now
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			return s
+	//		}(),
+	//		// service resource
+	//		func() runtime.Object {
+	//			svc := &servingv1alpha1.Service{
+	//				ObjectMeta: metav1.ObjectMeta{
+	//					Namespace: testNS,
+	//					Name:      serviceName,
+	//				},
+	//				Status: servingv1alpha1.ServiceStatus{
+	//					Status: duckv1beta1.Status{
+	//						Conditions: duckv1beta1.Conditions{{
+	//							Type:   servingv1alpha1.ServiceConditionReady,
+	//							Status: corev1.ConditionTrue,
+	//						}},
+	//					},
+	//					RouteStatusFields: servingv1alpha1.RouteStatusFields{
+	//						URL: &serviceURL,
+	//					},
+	//				},
+	//			}
+	//			svc.SetOwnerReferences(getOwnerReferences())
+	//			return svc
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressable(),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myuser",
+	//			expectedRepo:  "myproject",
+	//			hookID:        "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubEnterpriseSource()
+	//			s.UID = gitHubSourceUID
+	//			s.DeletionTimestamp = &now
+	//			s.Status.WebhookIDKey = ""
+	//			s.Finalizers = nil
+	//			return s
+	//		}(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "valid githubsource with event types created",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubEnterpriseSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Spec.Sink.Kind = brokerKind
+	//			return s
+	//		}(),
+	//		// service resource
+	//		func() runtime.Object {
+	//			svc := &servingv1alpha1.Service{
+	//				ObjectMeta: metav1.ObjectMeta{
+	//					Namespace: testNS,
+	//					Name:      serviceName,
+	//				},
+	//				Status: servingv1alpha1.ServiceStatus{
+	//					Status: duckv1beta1.Status{
+	//						Conditions: duckv1beta1.Conditions{{
+	//							Type:   servingv1alpha1.ServiceConditionReady,
+	//							Status: corev1.ConditionTrue,
+	//						}},
+	//					},
+	//					RouteStatusFields: servingv1alpha1.RouteStatusFields{
+	//						URL: &serviceURL,
+	//					},
+	//				},
+	//			}
+	//			svc.SetOwnerReferences(getOwnerReferences())
+	//			return svc
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressableWithKind(brokerKind),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myuser",
+	//			expectedRepo:  "myproject",
+	//			hookID:        "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubEnterpriseSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Status.ObservedGeneration = generation
+	//			s.Spec.Sink.Kind = brokerKind
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkSink(addressableURI)
+	//			s.Status.MarkSecrets()
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			s.Status.MarkEventTypes()
+	//			return s
+	//		}(),
+	//		getEventType(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "valid githubsource delete event type",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			return s
+	//		}(),
+	//		// service resource
+	//		func() runtime.Object {
+	//			svc := &servingv1alpha1.Service{
+	//				ObjectMeta: metav1.ObjectMeta{
+	//					Namespace: testNS,
+	//					Name:      serviceName,
+	//				},
+	//				Status: servingv1alpha1.ServiceStatus{
+	//					Status: duckv1beta1.Status{
+	//						Conditions: duckv1beta1.Conditions{{
+	//							Type:   servingv1alpha1.ServiceConditionReady,
+	//							Status: corev1.ConditionTrue,
+	//						}},
+	//					},
+	//					RouteStatusFields: servingv1alpha1.RouteStatusFields{
+	//						URL: &serviceURL,
+	//					},
+	//				},
+	//			}
+	//			svc.SetOwnerReferences(getOwnerReferences())
+	//			return svc
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressable(),
+	//		getEventType(),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myuser",
+	//			expectedRepo:  "myproject",
+	//			hookID:        "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkSink(addressableURI)
+	//			s.Status.MarkSecrets()
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			s.Status.MarkEventTypes()
+	//			return s
+	//		}(),
+	//	},
+	//	WantAbsent: []runtime.Object{
+	//		getEventType(),
+	//	},
+	//	IgnoreTimes: true,
+	//}, {
+	//	Name: "githubsource cannot create event types",
+	//
+	//	Objects: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubEnterpriseSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Spec.Sink.Kind = brokerKind
+	//			return s
+	//		}(),
+	//		// service resource
+	//		func() runtime.Object {
+	//			svc := &servingv1alpha1.Service{
+	//				ObjectMeta: metav1.ObjectMeta{
+	//					Namespace: testNS,
+	//					Name:      serviceName,
+	//				},
+	//				Status: servingv1alpha1.ServiceStatus{
+	//					Status: duckv1beta1.Status{
+	//						Conditions: duckv1beta1.Conditions{{
+	//							Type:   servingv1alpha1.ServiceConditionReady,
+	//							Status: corev1.ConditionTrue,
+	//						}},
+	//					},
+	//					RouteStatusFields: servingv1alpha1.RouteStatusFields{
+	//						URL: &serviceURL,
+	//					},
+	//				},
+	//			}
+	//			svc.SetOwnerReferences(getOwnerReferences())
+	//			return svc
+	//		}(),
+	//		getGitHubSecrets(),
+	//		getAddressableWithKind(brokerKind),
+	//	},
+	//	OtherTestData: map[string]interface{}{
+	//		webhookData: webhookCreatorData{
+	//			expectedOwner: "myuser",
+	//			expectedRepo:  "myproject",
+	//			hookID:        "repohookid",
+	//		},
+	//	},
+	//	Key:    fmt.Sprintf("%s/%s", testNS, gitHubSourceName),
+	//
+	//	Mocks: controllertesting.Mocks{
+	//		MockCreates: []controllertesting.MockCreate{
+	//			func(_ client.Client, _ context.Context, obj runtime.Object) (controllertesting.MockHandled, error) {
+	//				if _, ok := obj.(*eventingv1alpha1.EventType); ok {
+	//					return controllertesting.Handled, errors.New("test-induced-error")
+	//				}
+	//				return controllertesting.Unhandled, nil
+	//			},
+	//		},
+	//	},
+	//	WantPresent: []runtime.Object{
+	//		func() runtime.Object {
+	//			s := getGitHubEnterpriseSource()
+	//			s.UID = gitHubSourceUID
+	//			s.Spec.Sink.Kind = brokerKind
+	//			s.Status.ObservedGeneration = generation
+	//			s.Status.InitializeConditions()
+	//			s.Status.MarkSink(addressableURI)
+	//			s.Status.MarkSecrets()
+	//			s.Status.WebhookIDKey = "repohookid"
+	//			return s
+	//		}(),
+	//	},
+	//	WantAbsent: []runtime.Object{
+	//		getEventType(),
+	//	},
+	//	// TODO: use WantEvents ? WantErrMsg:  "test-induced-error",
+	//	IgnoreTimes: true,
+	//},
 }
 
 func TestAllCases(t *testing.T) {
-	recorder := record.NewBroadcaster().NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerAgentName})
+	logger := logtesting.TestLogger(t)
 
-	for _, tc := range testCases {
-		c := tc.GetClient()
-
-		var hookData webhookCreatorData
-		var ok bool
-		if hookData, ok = tc.OtherTestData[webhookData].(webhookCreatorData); !ok {
-			hookData = webhookCreatorData{}
-		}
-
+	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
 		r := &Reconciler{
-			scheme:   tc.Scheme,
-			recorder: recorder,
-			webhookClient: &mockWebhookClient{
-				data: hookData,
-			},
-			eventTypeReconciler: eventtype.Reconciler{
-				Scheme: tc.Scheme,
-			},
+			Base: reconciler.NewBase(ctx, controllerAgentName, cmw),
+			//secretLister:       listers.GetSecretLister(),
+			secretLister:       nil,
+			githubsourceLister: listers.GetGithubsourceLister(),
+			ksvcLister:         nil,
+			loggingContext:     ctx,
+			webhookClient:      nil,
 		}
-		r.InjectClient(c)
-		t.Run(tc.Name, tc.Runner(t, r, c))
-	}
+
+		r.sinkReconciler = duck.NewSinkReconciler(ctx, func(types.NamespacedName) {})
+		return r
+	},
+		true,
+		// TODO(nachtmaar): update dependency such that we can pass a logger as third argument ?
+		logger,
+	))
 }
 
 func getGitHubSource() *sourcesv1alpha1.GitHubSource {
@@ -1169,25 +1173,25 @@ type webhookCreatorData struct {
 
 // Direct Unit tests.
 
-func TestObjectNotGitHubSource(t *testing.T) {
-	r := Reconciler{}
-	obj := &corev1.ObjectReference{
-		Name:       unaddressableName,
-		Kind:       unaddressableKind,
-		APIVersion: unaddressableAPIVersion,
-	}
-
-	got := obj.DeepCopy()
-	gotErr := r.Reconcile(context.TODO(), got)
-	var want runtime.Object = obj
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("unexpected returned object (-want, +got) = %v", diff)
-	}
-	var wantErr error
-	if diff := cmp.Diff(wantErr, gotErr); diff != "" {
-		t.Errorf("unexpected returned error (-want, +got) = %v", diff)
-	}
-}
+//func TestObjectNotGitHubSource(t *testing.T) {
+//	r := Reconciler{}
+//	obj := &corev1.ObjectReference{
+//		Name:       unaddressableName,
+//		Kind:       unaddressableKind,
+//		APIVersion: unaddressableAPIVersion,
+//	}
+//
+//	got := obj.DeepCopy()
+//	gotErr := r.Reconcile(context.TODO(), got)
+//	var want runtime.Object = obj
+//	if diff := cmp.Diff(want, got); diff != "" {
+//		t.Errorf("unexpected returned object (-want, +got) = %v", diff)
+//	}
+//	var wantErr error
+//	if diff := cmp.Diff(wantErr, gotErr); diff != "" {
+//		t.Errorf("unexpected returned error (-want, +got) = %v", diff)
+//	}
+//}
 
 func TestOwnerAndRepositoryValid(t *testing.T) {
 	owner, repo, err := parseOwnerRepoFrom("owner/repository")

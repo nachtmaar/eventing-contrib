@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	v1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
-	githubsourcev1alph1ainformers "knative.dev/eventing-contrib/github/pkg/client/informers/externalversions/sources/v1alpha1"
+	githubsourcev1alpha1listers "knative.dev/eventing-contrib/github/pkg/client/listers/sources/v1alpha1"
 	"knative.dev/eventing/pkg/reconciler"
 	pkgLogging "knative.dev/pkg/logging"
 	"knative.dev/pkg/metrics"
@@ -73,7 +73,8 @@ type Reconciler struct {
 	webhookClient        webhookClient
 
 	// used to get GitHubSource
-	githubsourceInformer githubsourcev1alph1ainformers.GitHubSourceInformer
+	githubsourceLister githubsourcev1alpha1listers.GitHubSourceLister
+
 	// used to get Github secret
 	secretLister    v1.SecretLister
 	// used to get knative service
@@ -116,7 +117,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, key string) error {
 		return nil
 	}
 
-	src, err := r.githubsourceInformer.Lister().GitHubSources(namespace).Get(name)
+	src, err := r.githubsourceLister.GitHubSources(namespace).Get(name)
 	if apierrors.IsNotFound(err) {
 		logger.Error("could not find github source", zap.Any("key", key))
 		return nil
@@ -510,7 +511,7 @@ func (r *Reconciler) updateFinalizers(ctx context.Context, source *sourcesv1alph
 	// TODO: use events rather than logger
 	logger := logging.FromContext(ctx).Desugar()
 
-	githubSource, err := r.githubsourceInformer.Lister().GitHubSources(source.Namespace).Get(source.Name)
+	githubSource, err := r.githubsourceLister.GitHubSources(source.Namespace).Get(source.Name)
 	if err != nil {
 		logger.Error("could not get GitHubSource", zap.Error(err))
 		return nil
@@ -532,7 +533,7 @@ func (r *Reconciler) updateFinalizers(ctx context.Context, source *sourcesv1alph
 
 // TODO(nachtmaar) use on all status updates ?
 func (r *Reconciler) updateStatus(ctx context.Context, src *sourcesv1alpha1.GitHubSource) (*sourcesv1alpha1.GitHubSource, error) {
-	githubSource, err := r.githubsourceInformer.Lister().GitHubSources(src.Namespace).Get(src.Name)
+	githubSource, err := r.githubsourceLister.GitHubSources(src.Namespace).Get(src.Name)
 	if err != nil {
 		return nil, err
 	}

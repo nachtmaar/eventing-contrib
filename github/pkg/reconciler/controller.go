@@ -54,7 +54,7 @@ func NewController(
 		Base:                   reconciler.NewBase(ctx, controllerAgentName, cmw),
 		loggingContext:         ctx,
 		githubSourcesClientSet: githubClientSet,
-		githubsourceInformer:   githubsourceInformer,
+		githubsourceLister:     githubsourceInformer.Lister(),
 		secretLister:           secretLister,
 		ksvcLister:             ksvcLister,
 		servingClient:          servingClient,

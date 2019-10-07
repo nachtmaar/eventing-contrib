@@ -81,6 +81,9 @@ func (o *ObjectSorter) IndexerForObjectType(obj runtime.Object) cache.Indexer {
 
 	indexer, ok := o.cache[objType]
 
+	for k, _ := range o.cache {
+		fmt.Println(k.Name())
+	}
 	if !ok {
 		panic(fmt.Sprintf("indexer for type %v doesn't exist", objType.Name()))
 	}

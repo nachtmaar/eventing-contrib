@@ -32,6 +32,7 @@ import (
 	rbacv1listers "k8s.io/client-go/listers/rbac/v1"
 	"k8s.io/client-go/tools/cache"
 	githubsourcev1alpha1 "knative.dev/eventing-contrib/github/pkg/apis/sources/v1alpha1"
+	fakegithubsourceclientset "knative.dev/eventing-contrib/github/pkg/client/clientset/versioned/fake"
 	githublisters "knative.dev/eventing-contrib/github/pkg/client/listers/sources/v1alpha1"
 	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
 	messagingv1alpha1 "knative.dev/eventing/pkg/apis/messaging/v1alpha1"
@@ -54,6 +55,7 @@ var clientSetSchemes = []func(*runtime.Scheme) error{
 	fakesharedclientset.AddToScheme,
 	fakeeventingclientset.AddToScheme,
 	fakeapiextensionsclientset.AddToScheme,
+	fakegithubsourceclientset.AddToScheme,
 	subscriberAddToScheme,
 }
 

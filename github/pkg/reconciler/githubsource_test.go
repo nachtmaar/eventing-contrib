@@ -35,12 +35,13 @@ import (
 	sourcesv1alpha1 "knative.dev/eventing-contrib/github/pkg/apis/sources/v1alpha1"
 	"knative.dev/eventing-contrib/github/pkg/reconciler/resources"
 	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
-	. "knative.dev/eventing/pkg/reconciler/testing"
 	"knative.dev/pkg/apis"
 	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
 	logtesting "knative.dev/pkg/logging/testing"
 	. "knative.dev/pkg/reconciler/testing"
 	servingv1alpha1 "knative.dev/serving/pkg/apis/serving/v1alpha1"
+
+	githubsourcetesting "knative.dev/eventing-contrib/github/pkg/reconciler/testing"
 )
 
 var (
@@ -869,23 +870,21 @@ var table = TableTest{
 
 func TestAllCases(t *testing.T) {
 	logger := logtesting.TestLogger(t)
-
-	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
+	fn := func(ctx context.Context, listers *githubsourcetesting.Listers, cmw configmap.Watcher) controller.Reconciler {
 		r := &Reconciler{
-			Base: reconciler.NewBase(ctx, controllerAgentName, cmw),
-			//secretLister:       listers.GetSecretLister(),
-			secretLister:       nil,
+			Base:               reconciler.NewBase(ctx, controllerAgentName, cmw),
+			secretLister:       listers.GetSecretLister(),
 			githubsourceLister: listers.GetGithubsourceLister(),
 			ksvcLister:         nil,
 			loggingContext:     ctx,
 			webhookClient:      nil,
 		}
-
 		r.sinkReconciler = duck.NewSinkReconciler(ctx, func(types.NamespacedName) {})
 		return r
-	},
+	}
+	table.Test(t, githubsourcetesting.MakeFactory(
+		fn,
 		true,
-		// TODO(nachtmaar): update dependency such that we can pass a logger as third argument ?
 		logger,
 	))
 }
